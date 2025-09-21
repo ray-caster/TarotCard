@@ -1,0 +1,466 @@
+import * as THREE from 'three';
+import { gsap } from 'gsap';
+import GUI from 'lil-gui';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { FilmPass } from 'three/addons/postprocessing/FilmPass.js';
+import { VignetteShader } from 'three/addons/shaders/VignetteShader.js';
+import { RGBShiftShader } from 'three/addons/shaders/RGBShiftShader.js';
+import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
+import { BokehPass } from 'three/addons/postprocessing/BokehPass.js';
+import { AfterimagePass } from 'three/addons/postprocessing/AfterimagePass.js';
+import { SepiaShader } from 'three/addons/shaders/SepiaShader.js';
+import { ColorCorrectionShader } from 'three/addons/shaders/ColorCorrectionShader.js';
+
+import { SETTINGS, CARD_DATA, CARD_GEOMETRY, DECK_LAYER, PRESENTED_CARD_LAYER } from './config.js';
+import { UIManager, FiniteStateMachine, AnimationController } from './components.js';
+import { CustomHalftonePass } from './postprocessing.js';
+
+export class WebGLApp {
+    constructor() {
+        this.ui = new UIManager();
+        this.fsm = new FiniteStateMachine();
+        this.isDebugMode = false;
+        this.titleClickCount = 0;
+        this.clock = new THREE.Clock();
+        this.isTouchDevice = ('ontouchstart' in window);
+        this.mouse = new THREE.Vector2(-100, -100);
+        this.raycaster = new THREE.Raycaster();
+        this.intersectedCard = null;
+        this.velocityY = 0;
+        this.needsRender = true;
+        this.dragStart = new THREE.Vector2();
+        this.lastTouchX = 0;
+        this.currentPanY = 0;
+        this.targetPanY = 0;
+        this.init();
+    }
+    async init() {
+        this.globalTooltip = document.getElementById('global-tooltip');
+        this.setupLoadingManager();
+        this.generateSEOContent();
+        this.setupScene();
+        this.setupControls();
+        this.setupLights();
+        this.setupShadows();
+        this.setupPostProcessing();
+        this.handleResize();
+        this.orbitGroup = new THREE.Group();
+        this.orbitGroup.name = 'orbitGroup';
+        this.scene.add(this.orbitGroup);
+        this.cards = [];
+        await this.rebuildScene();
+        this.loadCustomFont(SETTINGS.typography.fontLink);
+        this.setupEventListeners();
+        this.animate();
+    }
+    async precompileShaders() {
+        console.log("Pre-compiling shaders...");
+        const card = this.cards[0];
+        if (!card) return;
+        const originalIntensity = this.presentedCardLight.intensity;
+        card.traverse(child => child.layers.set(PRESENTED_CARD_LAYER));
+        this.presentedCardLight.intensity = SETTINGS.lighting.presentLight.intensity;
+        this.spotLight.castShadow = false;
+        this.renderer.compile(this.scene, this.camera);
+        card.traverse(child => child.layers.set(DECK_LAYER));
+        this.presentedCardLight.intensity = originalIntensity;
+        this.spotLight.castShadow = SETTINGS.shadows.enabled;
+        this.renderer.render(this.scene, this.camera);
+        console.log("Shader pre-compilation complete.");
+    }
+    setupLoadingManager() {
+        this.loadingManager = new THREE.LoadingManager();
+        const loadingOverlay = document.getElementById('loading-overlay');
+        const progressBar = document.getElementById('progress-bar-inner');
+        const progressText = document.getElementById('progress-text');
+        this.loadingManager.onProgress = (url, itemsLoaded, itemsTotal) => { progressBar.style.width = `${(itemsLoaded / itemsTotal) * 100}%`; progressText.textContent = `Loading asset ${itemsLoaded} of ${itemsTotal}...`; };
+        this.loadingManager.onLoad = () => {
+            setTimeout(async () => {
+                await this.generateAndApplyBackTextures();
+                await this.precompileShaders();
+                loadingOverlay.classList.add('is-hidden');
+                this.fsm.transitionTo('IDLE');
+                this.setNeedsRender();
+            }, 500);
+        };
+        this.loadingManager.onError = (url) => { console.error('Error loading ' + url); progressText.textContent = `Error loading asset. Please refresh.`; };
+    }
+    generateSEOContent() { document.getElementById('seo-card-container').innerHTML = CARD_DATA.map(d => `<article><h3>${d.title}</h3><img src="${d.imageUrl}" alt="${d.title} tarot card"><p>${d.description}</p></article>`).join(''); }
+    setupScene() {
+        this.scene = new THREE.Scene();
+        const backgroundGeometry = new THREE.PlaneGeometry(2, 2, 1, 1);
+        this.backgroundMaterial = new THREE.ShaderMaterial({
+            uniforms: { color1: { value: new THREE.Color(SETTINGS.scene.backgroundColor1) }, color2: { value: new THREE.Color(SETTINGS.scene.backgroundColor2) }, sharpness: { value: SETTINGS.scene.gradientSharpness }, },
+            vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 1.0, 1.0); }`,
+            fragmentShader: `varying vec2 vUv; uniform vec3 color1; uniform vec3 color2; uniform float sharpness; void main() { float d = distance(vUv, vec2(0.5)); vec3 color = mix(color1, color2, smoothstep(0.0, sharpness, d)); gl_FragColor = vec4(color, 1.0); }`,
+            depthTest: false, depthWrite: false,
+        });
+        this.backgroundMesh = new THREE.Mesh(backgroundGeometry, this.backgroundMaterial);
+        this.backgroundMesh.renderOrder = -999;
+        this.scene.add(this.backgroundMesh);
+        this.camera = new THREE.PerspectiveCamera(SETTINGS.camera.fov, window.innerWidth / window.innerHeight, 0.1, 1000);
+        this.camera.position.set(SETTINGS.camera.position.x, SETTINGS.camera.position.y, SETTINGS.camera.position.z);
+        this.camera.layers.enableAll();
+        this.renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('three-canvas'), antialias: false, preserveDrawingBuffer: true });
+        this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+        this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        this.renderer.shadowMap.enabled = true; this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        this.renderer.setClearColor(SETTINGS.scene.backgroundColor2);
+        this.updateTypography(); this.updateBackground();
+    }
+    setupControls() { this.controls = new OrbitControls(this.camera, this.renderer.domElement); this.controls.enabled = false; this.controls.enableDamping = true; this.controls.addEventListener('change', () => this.setNeedsRender()); }
+    setupLights() {
+        this.ambientLight = new THREE.AmbientLight(SETTINGS.lighting.ambient.color, SETTINGS.lighting.ambient.intensity); this.scene.add(this.ambientLight);
+        this.spotLight = new THREE.SpotLight(SETTINGS.lighting.spotlight.color, SETTINGS.lighting.spotlight.intensity); this.spotLight.position.set(SETTINGS.lighting.spotlight.position.x, SETTINGS.lighting.spotlight.position.y, SETTINGS.lighting.spotlight.position.z); this.spotLight.angle = SETTINGS.lighting.spotlight.angle; this.spotLight.penumbra = SETTINGS.lighting.spotlight.penumbra; this.spotLight.castShadow = true; this.spotLight.decay = SETTINGS.lighting.spotlight.decay; this.spotLight.shadow.mapSize.width = SETTINGS.shadows.mapSize; this.spotLight.shadow.mapSize.height = SETTINGS.shadows.mapSize; this.spotLight.shadow.bias = SETTINGS.shadows.bias; this.spotLight.shadow.normalBias = SETTINGS.shadows.normalBias; this.spotLight.layers.set(DECK_LAYER); this.scene.add(this.spotLight); this.spotLight.target.position.set(SETTINGS.lighting.spotlight.target.x, SETTINGS.lighting.spotlight.target.y, SETTINGS.lighting.spotlight.target.z); this.scene.add(this.spotLight.target);
+        const pLightSettings = SETTINGS.lighting.presentLight; this.presentedCardLight = new THREE.PointLight(pLightSettings.color, pLightSettings.intensity, pLightSettings.distance, pLightSettings.decay); this.presentedCardLight.intensity = 0; this.presentedCardLight.castShadow = false; this.presentedCardLight.layers.set(PRESENTED_CARD_LAYER); this.scene.add(this.presentedCardLight);
+        const rimSettings = SETTINGS.lighting.rimLight; this.rimLight = new THREE.DirectionalLight(rimSettings.color, rimSettings.intensity); this.rimLight.position.set(rimSettings.position.x, rimSettings.position.y, rimSettings.position.z); this.rimLight.visible = rimSettings.enabled; this.scene.add(this.rimLight); this.rimLight.target.position.set(rimSettings.target.x, rimSettings.target.y, rimSettings.target.z); this.scene.add(this.rimLight.target);
+        this.spotLightHelper = new THREE.SpotLightHelper(this.spotLight); this.spotLightHelper.visible = false; this.scene.add(this.spotLightHelper);
+        this.rimLightHelper = new THREE.DirectionalLightHelper(this.rimLight, 1); this.rimLightHelper.visible = false; this.scene.add(this.rimLightHelper);
+    }
+    setupShadows() { const planeGeometry = new THREE.PlaneGeometry(SETTINGS.shadows.planeSize, SETTINGS.shadows.planeSize); const planeMaterial = new THREE.ShadowMaterial({ opacity: SETTINGS.shadows.planeOpacity }); this.shadowPlane = new THREE.Mesh(planeGeometry, planeMaterial); this.shadowPlane.rotation.x = -Math.PI / 2; this.shadowPlane.position.y = SETTINGS.shadows.planeY; this.shadowPlane.receiveShadow = true; this.shadowPlane.layers.set(DECK_LAYER); this.shadowPlane.visible = SETTINGS.shadows.enabled; this.scene.add(this.shadowPlane); }
+    setupPostProcessing() {
+        const renderTarget = new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight, { samples: 0 });
+        this.composer = new EffectComposer(this.renderer, renderTarget);
+        this.composer.addPass(new RenderPass(this.scene, this.camera));
+        this.afterimagePass = new AfterimagePass(); this.composer.addPass(this.afterimagePass);
+        this.bokehPass = new BokehPass(this.scene, this.camera, {}); this.composer.addPass(this.bokehPass);
+        this.filmPass = new FilmPass(); this.composer.addPass(this.filmPass);
+        this.halftonePass = new CustomHalftonePass(window.innerWidth, window.innerHeight, SETTINGS.postProcessing.halftone); this.composer.addPass(this.halftonePass);
+        this.colorCorrectionPass = new ShaderPass(ColorCorrectionShader); this.composer.addPass(this.colorCorrectionPass);
+        this.sepiaPass = new ShaderPass(SepiaShader); this.composer.addPass(this.sepiaPass);
+        this.rgbShiftPass = new ShaderPass(RGBShiftShader); this.composer.addPass(this.rgbShiftPass);
+        this.vignettePass = new ShaderPass(VignetteShader); this.composer.addPass(this.vignettePass);
+        this.smaaPass = new SMAAPass(window.innerWidth * this.renderer.getPixelRatio(), window.innerHeight * this.renderer.getPixelRatio()); this.composer.addPass(this.smaaPass);
+        this.composer.addPass(new OutputPass());
+        this.updatePostProcessingState();
+    }
+    updatePostProcessingState() {
+        const pp = SETTINGS.postProcessing; const u = (p, n, v) => { if (p && p.uniforms[n]) p.uniforms[n].value = v; };
+        this.filmPass.enabled = pp.film.enabled; u(this.filmPass, 'nIntensity', pp.film.noiseIntensity); u(this.filmPass, 'sIntensity', pp.film.scanlineIntensity); u(this.filmPass, 'sCount', pp.film.scanlineCount);
+        this.rgbShiftPass.enabled = pp.rgbShift.enabled; u(this.rgbShiftPass, 'amount', pp.rgbShift.amount); u(this.rgbShiftPass, 'angle', pp.rgbShift.angle * (Math.PI / 180));
+        this.vignettePass.enabled = pp.vignette.enabled; u(this.vignettePass, 'offset', pp.vignette.offset); u(this.vignettePass, 'darkness', pp.vignette.darkness);
+        this.smaaPass.enabled = pp.smaa.enabled;
+        this.bokehPass.enabled = pp.dof.enabled; u(this.bokehPass, 'focus', pp.dof.focus); u(this.bokehPass, 'aperture', pp.dof.aperture); u(this.bokehPass, 'maxblur', pp.dof.maxblur);
+        this.halftonePass.enabled = pp.halftone.enabled; u(this.halftonePass, 'shape', pp.halftone.shape); u(this.halftonePass, 'radius', pp.halftone.radius); u(this.halftonePass, 'rotateR', pp.halftone.rotateR * (Math.PI / 180)); u(this.halftonePass, 'rotateG', pp.halftone.rotateG * (Math.PI / 180)); u(this.halftonePass, 'rotateB', pp.halftone.rotateB * (Math.PI / 180)); u(this.halftonePass, 'scatter', pp.halftone.scatter); u(this.halftonePass, 'greyscale', pp.halftone.greyscale); u(this.halftonePass, 'useAverageColor', pp.halftone.useAverageColor); u(this.halftonePass, 'customColor', new THREE.Color(pp.halftone.customColor));
+        this.colorCorrectionPass.enabled = pp.colorCorrection.enabled; u(this.colorCorrectionPass, 'powRGB', new THREE.Vector3(pp.colorCorrection.powRGB.x, pp.colorCorrection.powRGB.y, pp.colorCorrection.powRGB.z)); u(this.colorCorrectionPass, 'mulRGB', new THREE.Vector3(pp.colorCorrection.mulRGB.x, pp.colorCorrection.mulRGB.y, pp.colorCorrection.mulRGB.z)); u(this.colorCorrectionPass, 'addRGB', new THREE.Vector3(pp.colorCorrection.addRGB.x, pp.colorCorrection.addRGB.y, pp.colorCorrection.addRGB.z));
+        this.sepiaPass.enabled = pp.sepia.enabled; u(this.sepiaPass, 'amount', pp.sepia.amount);
+        this.afterimagePass.enabled = pp.afterimage.enabled; u(this.afterimagePass, 'damp', pp.afterimage.damp);
+        this.setNeedsRender();
+    }
+    isPostProcessingEnabled() { return Object.values(SETTINGS.postProcessing).some(effect => effect.enabled); }
+    async setupCards() {
+        const textureLoader = new THREE.TextureLoader(this.loadingManager);
+        let cardIndex = 0;
+        for (const cardData of CARD_DATA) {
+            const [frontTexture, normalMap] = await Promise.all([textureLoader.loadAsync(cardData.imageUrl), textureLoader.loadAsync(cardData.normalUrl)]);
+            frontTexture.colorSpace = THREE.SRGBColorSpace;
+            const cardGroup = this.createCardMesh(frontTexture, normalMap);
+            cardGroup.userData = { index: cardIndex };
+            this.orbitGroup.add(cardGroup);
+            this.cards.push(cardGroup);
+            cardIndex++;
+        }
+        this.updateCardLayout();
+        this.cards.forEach(cardGroup => { cardGroup.userData.initialPosition = cardGroup.position.clone(); cardGroup.userData.initialQuaternion = cardGroup.quaternion.clone(); });
+        this.animationController = new AnimationController(this.scene, this.camera, this.cards, this.presentedCardLight, this.shadowPlane, this.spotLight);
+        if (!this.gui) { this.setupGUI(); }
+    }
+    updateCardLayout() {
+        const angleStep = CARD_DATA.length <= 1 ? 0 : SETTINGS.cardLayout.arc / (CARD_DATA.length - 1);
+        const localCardEuler = new THREE.Euler(THREE.MathUtils.degToRad(SETTINGS.cardLayout.pitch), THREE.MathUtils.degToRad(SETTINGS.cardLayout.yaw), THREE.MathUtils.degToRad(SETTINGS.cardLayout.roll), 'XYZ');
+        this.cards.forEach((cardGroup, i) => {
+            const posAngleDeg = i * angleStep - (SETTINGS.cardLayout.arc / 2);
+            const posAngleRad = THREE.MathUtils.degToRad(posAngleDeg);
+            const yOffset = (i - (CARD_DATA.length - 1) / 2) * SETTINGS.cardLayout.spacing;
+            cardGroup.position.set(Math.sin(posAngleRad) * SETTINGS.cardLayout.radius, yOffset, (Math.cos(posAngleRad) * SETTINGS.cardLayout.radius));
+            const finalLocalQuaternion = new THREE.Quaternion().setFromEuler(localCardEuler);
+            const skewXQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), THREE.MathUtils.degToRad(SETTINGS.cardLayout.skew.x * (i - (this.cards.length - 1) / 2)));
+            const skewYQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), THREE.MathUtils.degToRad(SETTINGS.cardLayout.skew.y * (i - (this.cards.length - 1) / 2)));
+            finalLocalQuaternion.multiply(skewXQuat).multiply(skewYQuat);
+            const orbitPlacementQuaternion = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, posAngleRad, 0));
+            cardGroup.quaternion.multiplyQuaternions(orbitPlacementQuaternion, finalLocalQuaternion);
+            const { position: posJitter, rotation: rotJitter } = SETTINGS.cardLayout.jitter;
+            if (posJitter > 0) { cardGroup.position.x += (Math.random() - 0.5) * posJitter; cardGroup.position.y += (Math.random() - 0.5) * posJitter; cardGroup.position.z += (Math.random() - 0.5) * posJitter; }
+            if (rotJitter > 0) { const jitterEuler = new THREE.Euler((Math.random() - 0.5) * THREE.MathUtils.degToRad(rotJitter), (Math.random() - 0.5) * THREE.MathUtils.degToRad(rotJitter), (Math.random() - 0.5) * THREE.MathUtils.degToRad(rotJitter)); const jitterQuat = new THREE.Quaternion().setFromEuler(jitterEuler); cardGroup.quaternion.multiply(jitterQuat); }
+            cardGroup.traverse(child => { child.layers.set(DECK_LAYER); });
+            if (cardGroup.userData.initialPosition) { cardGroup.userData.initialPosition.copy(cardGroup.position); cardGroup.userData.initialQuaternion.copy(cardGroup.quaternion); }
+        });
+        this.setNeedsRender();
+    }
+    async generateAndApplyBackTextures() {
+        const template = document.getElementById('card-back-template');
+        const width = parseInt(template.style.width || getComputedStyle(template).width);
+        const height = parseInt(template.style.height || getComputedStyle(template).height);
+        for (let i = 0; i < CARD_DATA.length; i++) {
+            const data = CARD_DATA[i];
+            try {
+                const canvas = document.createElement('canvas');
+                canvas.width = width;
+                canvas.height = height;
+                const ctx = canvas.getContext('2d');
+                ctx.fillStyle = 'red';
+                ctx.fillRect(0, 0, width, height);
+                ctx.fillStyle = 'white';
+                ctx.font = '40px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText(data.title, width / 2, 80);
+                ctx.font = '20px sans-serif';
+                ctx.fillText('This is the back', width / 2, height / 2);
+                const texture = new THREE.CanvasTexture(canvas);
+                texture.colorSpace = THREE.SRGBColorSpace;
+                texture.needsUpdate = true;
+                const card = this.cards[i];
+                if (card) {
+                    const backMesh = card.getObjectByName('back_standard');
+                    if (backMesh) {
+                        if (backMesh.material.map) backMesh.material.map.dispose();
+                        backMesh.material.map = texture;
+                        backMesh.material.needsUpdate = true;
+                        this.setNeedsRender();
+                    }
+                }
+            } catch (error) {
+                console.error("Failed to generate back texture for card", i, error);
+            }
+        }
+    }
+    createCardMesh(frontTexture, normalMapTexture) {
+        const { roughness, metalness, normalScale, useNormalMap, emissive, emissiveIntensity } = SETTINGS.cardMaterial;
+        const group = new THREE.Group();
+        const frontMaterialProps = { roughness, metalness, normalMap: useNormalMap ? normalMapTexture : null, normalScale: new THREE.Vector2(normalScale.x, normalScale.y), emissive: new THREE.Color(emissive), emissiveIntensity, emissiveMap: frontTexture };
+        const backMaterialProps = { roughness, metalness, emissive: new THREE.Color(emissive), emissiveIntensity };
+        const frontMaterial = new THREE.MeshStandardMaterial({ map: frontTexture, ...frontMaterialProps });
+        const backMaterial = new THREE.MeshStandardMaterial({ color: 0xffffff, ...backMaterialProps });
+        const frontMeshStandard = new THREE.Mesh(CARD_GEOMETRY, frontMaterial);
+        frontMeshStandard.name = "front_standard";
+        frontMeshStandard.castShadow = true;
+        frontMeshStandard.receiveShadow = true;
+        const backMeshStandard = new THREE.Mesh(CARD_GEOMETRY, backMaterial);
+        backMeshStandard.name = "back_standard";
+        backMeshStandard.rotation.y = Math.PI;
+        backMeshStandard.castShadow = true;
+        backMeshStandard.receiveShadow = true;
+        group.add(frontMeshStandard, backMeshStandard);
+        return group;
+    }
+    setupEventListeners() { let resizeTimeout; window.addEventListener('resize', () => { clearTimeout(resizeTimeout); resizeTimeout = setTimeout(() => this.handleResize(), 150); }); const mainTitle = document.getElementById('main-title'); mainTitle.addEventListener('click', () => { this.titleClickCount++; clearTimeout(this.titleClickTimer); if (this.titleClickCount === 3) { this.titleClickCount = 0; this.toggleDebugMode(); } else { this.titleClickTimer = setTimeout(() => { this.titleClickCount = 0; }, 1000); } }); this.ui.dismissButton.addEventListener('click', () => this.dismissPresentedCard()); this.ui.arrowLeft.addEventListener('click', (e) => { e.stopPropagation(); this.cycleCard(-1); }); this.ui.arrowRight.addEventListener('click', (e) => { e.stopPropagation(); this.cycleCard(1); }); window.addEventListener('mousemove', this.handleMouseMove.bind(this), { passive: true }); window.addEventListener('mousedown', this.handleMouseDown.bind(this)); window.addEventListener('mouseup', this.handleMouseUp.bind(this)); window.addEventListener('touchstart', this.handleTouchStart.bind(this), { passive: false }); window.addEventListener('touchmove', this.handleTouchMove.bind(this), { passive: false }); window.addEventListener('touchend', this.handleTouchEnd.bind(this)); window.addEventListener('keydown', (e) => { if (this.fsm.currentState === 'PRESENTED') { if (e.key === 'ArrowLeft') this.cycleCard(-1); if (e.key === 'ArrowRight') this.cycleCard(1); if (e.key === 'Escape') this.dismissPresentedCard(); } }); }
+    setNeedsRender() { this.needsRender = true; }
+    animate() {
+        requestAnimationFrame(this.animate.bind(this));
+        const delta = this.clock.getDelta();
+        if (this.isDebugMode) { this.controls.update(); } else { this.updateOrbitAndPanning(); }
+        this.updateIntersections();
+        this.updatePresentedCardParallax();
+        const pp = SETTINGS.postProcessing;
+        if (this.isPostProcessingEnabled()) { if (pp.film.enabled) { this.filmPass.uniforms['time'].value += delta; this.setNeedsRender(); } }
+        if (!this.needsRender && !this.isDebugMode) return;
+        const isHalftoneBackgroundOnly = pp.halftone.enabled && pp.halftone.backgroundOnly;
+        if (isHalftoneBackgroundOnly) {
+            this.orbitGroup.visible = false; this.backgroundMesh.visible = true; this.halftonePass.enabled = true; this.composer.render();
+            this.orbitGroup.visible = true; this.backgroundMesh.visible = false; this.renderer.clearDepth(); this.renderer.autoClear = false;
+            this.renderer.render(this.scene, this.camera);
+            this.renderer.autoClear = true; this.backgroundMesh.visible = true;
+        } else { if (this.isPostProcessingEnabled()) { this.composer.render(); } else { this.renderer.render(this.scene, this.camera); } }
+        this.needsRender = false;
+    }
+    updateOrbitAndPanning() { if (this.fsm.currentState !== 'IDLE' && this.fsm.currentState !== 'PRESENTED') this.velocityY = 0; this.targetPanY += this.velocityY; this.velocityY *= SETTINGS.interaction.friction; this.targetPanY = Math.max(this.minPanY, Math.min(this.maxPanY, this.targetPanY)); this.currentPanY += (this.targetPanY - this.currentPanY) * 0.1; const { x: pitch, y: yaw } = SETTINGS.orbit.rotation; const combinedYawAndPanAngle = THREE.MathUtils.degToRad(yaw) + this.currentPanY; const yawAndPanQuaternion = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), combinedYawAndPanAngle); const pitchQuaternion = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), THREE.MathUtils.degToRad(pitch)); this.orbitGroup.quaternion.multiplyQuaternions(pitchQuaternion, yawAndPanQuaternion); this.setNeedsRender(); }
+    updatePresentedCardParallax() { if (this.fsm.currentState !== 'PRESENTED' || !this.animationController.presentedCard) return; const card = this.animationController.presentedCard; const factor = SETTINGS.interaction.parallaxFactor; if (factor <= 0) return; const targetTransform = this.animationController.calculatePresentedCardTransform(); const parallaxRotation = new THREE.Quaternion().setFromEuler(new THREE.Euler(-this.mouse.y * factor, this.mouse.x * factor, 0, 'XYZ')); const finalQuaternion = new THREE.Quaternion().multiplyQuaternions(parallaxRotation, targetTransform.quaternion); card.quaternion.slerp(finalQuaternion, 0.1); this.setNeedsRender(); }
+    updateIntersections() { if (this.fsm.currentState === 'PRESENTING' || this.fsm.currentState === 'DISMISSING' || this.fsm.currentState === 'SWITCHING') { if (this.intersectedCard) { this.intersectedCard = null; this.ui.setCursor('default'); } return; } this.raycaster.setFromCamera(this.mouse, this.camera); const intersects = this.raycaster.intersectObjects(this.orbitGroup.children, true); let newIntersected = null; if (intersects.length > 0) { const firstIntersected = intersects[0].object.parent; if (firstIntersected !== this.animationController.presentedCard) { newIntersected = firstIntersected; } } if (newIntersected !== this.intersectedCard) { if (this.intersectedCard) { gsap.to(this.intersectedCard.scale, { x: 1, y: 1, z: 1, duration: 0.3, onUpdate: () => this.setNeedsRender() }); } this.intersectedCard = newIntersected; if (this.intersectedCard) { gsap.to(this.intersectedCard.scale, { x: SETTINGS.interaction.hoverScale, y: SETTINGS.interaction.hoverScale, z: SETTINGS.interaction.hoverScale, duration: 0.3, onUpdate: () => this.setNeedsRender() }); } } this.ui.setCursor(this.intersectedCard ? 'pointer' : 'default'); }
+    handleMouseMove(event) { this.mouse.x = (event.clientX / window.innerWidth) * 2 - 1; this.mouse.y = -(event.clientY / window.innerHeight) * 2 + 1; const edgeX = window.innerWidth * SETTINGS.interaction.panEdgeRatio; if (!this.isTouchDevice && this.fsm.currentState === 'IDLE' && !this.isDragging) { let speed = 0; if (event.clientX < edgeX) speed = ((edgeX - event.clientX) / edgeX) * SETTINGS.interaction.panEdgeSpeed; else if (event.clientX > window.innerWidth - edgeX) speed = -((event.clientX - (window.innerWidth - edgeX)) / edgeX) * SETTINGS.interaction.panEdgeSpeed; this.velocityY = speed; } this.setNeedsRender(); }
+    handleMouseDown(event) { if (this.gui?.domElement.contains(event.target)) return; this.isDragging = true; this.dragStart.set(event.clientX, event.clientY); }
+    handleMouseUp(event) { if (!this.isDragging) return; this.isDragging = false; const dist = this.dragStart.distanceTo(new THREE.Vector2(event.clientX, event.clientY)); if (dist < SETTINGS.interaction.clickThreshold && this.intersectedCard) { if (this.fsm.currentState === 'PRESENTED') { this.switchCard(this.intersectedCard); } else if (this.fsm.canTransitionTo('PRESENTING')) { this.presentCard(this.intersectedCard); } } }
+    handleTouchStart(event) { if (this.gui?.domElement.contains(event.target)) return; this.isDragging = true; this.dragStart.set(event.touches[0].clientX, event.touches[0].clientY); this.lastTouchX = event.touches[0].clientX; this.mouse.x = (event.touches[0].clientX / window.innerWidth) * 2 - 1; this.mouse.y = -(event.touches[0].clientY / window.innerHeight) * 2 + 1; this.setNeedsRender(); }
+    handleTouchMove(event) { if (!this.isDragging || this.fsm.currentState === 'PRESENTED' || !this.isTouchDevice) return; event.preventDefault(); const touchX = event.touches[0].clientX; const deltaX = touchX - this.lastTouchX; this.lastTouchX = touchX; this.velocityY += deltaX * 0.0002; this.setNeedsRender(); }
+    handleTouchEnd(event) { if (!this.isDragging) return; this.isDragging = false; const lastTouch = event.changedTouches[0]; const dist = this.dragStart.distanceTo(new THREE.Vector2(lastTouch.clientX, lastTouch.clientY)); if (dist < SETTINGS.interaction.clickThreshold && this.intersectedCard) { if (this.fsm.currentState === 'PRESENTED') { this.switchCard(this.intersectedCard); } else if (this.fsm.canTransitionTo('PRESENTING')) { this.presentCard(this.intersectedCard); } } }
+    async presentCard(card) { if (!this.fsm.transitionTo('PRESENTING')) return; this.toggleLayoutGUI(false); this.intersectedCard = null; this.ui.showCardPresentationUI(); await this.animationController.present(card); this.fsm.transitionTo('PRESENTED'); }
+    async dismissPresentedCard() { const cardToDismiss = this.animationController.presentedCard; if (!cardToDismiss || !this.fsm.transitionTo('DISMISSING')) return; this.ui.showCardSelectionUI(); await this.animationController.dismiss(cardToDismiss); this.toggleLayoutGUI(true); this.fsm.transitionTo('IDLE'); }
+    async switchCard(newCard) { const oldCard = this.animationController.presentedCard; if (!oldCard || !newCard || newCard === oldCard || !this.fsm.canTransitionTo('SWITCHING')) return; if (!this.fsm.transitionTo('SWITCHING')) return; this.intersectedCard = null; await Promise.all([this.animationController.dismiss(oldCard), this.animationController.present(newCard)]); this.fsm.transitionTo('PRESENTED'); }
+    cycleCard(direction) { const presentedCard = this.animationController.presentedCard; if (!presentedCard) return; const currentIndex = presentedCard.userData.index; const nextIndex = (currentIndex + direction + this.cards.length) % this.cards.length; const newCard = this.cards[nextIndex]; this.switchCard(newCard); }
+    toggleDebugMode() { this.isDebugMode = !this.isDebugMode; this.controls.enabled = this.isDebugMode; this.spotLightHelper.visible = this.isDebugMode && SETTINGS.lighting.spotlight.showGuide; this.rimLightHelper.visible = this.isDebugMode && SETTINGS.lighting.rimLight.enabled && SETTINGS.lighting.rimLight.showGuide; this.gui?.domElement.classList.toggle('is-hidden', !this.isDebugMode); if (!this.isDebugMode) { gsap.to(this.camera.position, { ...SETTINGS.camera.position, duration: 0.5, ease: 'power2.out' }); this.controls.target.set(0, 0, 0); } this.setNeedsRender(); }
+    toggleLayoutGUI(enabled) { if (this.orbitFolder) this.orbitFolder.controllers.forEach(c => enabled ? c.enable() : c.disable()); if (this.layoutFolder) this.layoutFolder.controllers.forEach(c => enabled ? c.enable() : c.disable()); }
+    showTooltip(event) { const icon = event.target; const tooltip = this.globalTooltip; tooltip.textContent = icon.dataset.tooltip; const iconRect = icon.getBoundingClientRect(); const padding = 10; tooltip.style.left = '-9999px'; tooltip.style.top = '-9999px'; tooltip.classList.add('is-visible'); const tooltipRect = tooltip.getBoundingClientRect(); let top = iconRect.top - tooltipRect.height - 8; let left = iconRect.left + (iconRect.width / 2) - (tooltipRect.width / 2); if (top < padding) { top = iconRect.bottom + 8; } if (left < padding) { left = padding; } if (left + tooltipRect.width > window.innerWidth - padding) { left = window.innerWidth - tooltipRect.width - padding; } tooltip.style.top = `${top}px`; tooltip.style.left = `${left}px`; }
+    hideTooltip() { this.globalTooltip.classList.remove('is-visible'); }
+    addInfo(controller, text) { const info = document.createElement('span'); info.classList.add('info-icon'); info.textContent = '?'; info.dataset.tooltip = text; info.addEventListener('mouseenter', this.showTooltip.bind(this)); info.addEventListener('mouseleave', this.hideTooltip.bind(this)); const targetElement = controller.domElement.querySelector('.name') || controller.domElement.querySelector('.title'); if (targetElement) { targetElement.appendChild(info); } return controller; }
+    setupGUI() {
+        if (this.gui) this.gui.destroy();
+        this.gui = new GUI();
+        this.gui.domElement.addEventListener('mousedown', (e) => e.stopPropagation());
+        this.gui.domElement.addEventListener('pointerdown', (e) => e.stopPropagation());
+        this.gui.title("Visual Settings"); this.gui.domElement.classList.add('is-hidden');
+        const addFolder = (parent, name, className, infoText) => { const f = parent.addFolder(name); if (className) f.domElement.classList.add(className); if (infoText) this.addInfo(f, infoText); return f; };
+        const descriptiveEases = { "Default": "power1.out", "Smooth": "power2.inOut", "Fast to Slow": "expo.out", "Slow to Fast": "expo.in", "Bouncy": "back.out(1.7)", "Very Bouncy": "back.out(2.5)", "Elastic": "elastic.out(1, 0.5)", "Sudden Stop": "power4.in", };
+        const sceneSetup = addFolder(this.gui, 'Scene Setup', 'gui-scene-setup', 'Controls for the overall scene environment, including background, text, camera, and lighting.');
+        const backgroundFolder = addFolder(sceneSetup, 'Background', null, 'Adjust the scene\'s background gradient.').close();
+        this.addInfo(backgroundFolder.addColor(SETTINGS.scene, 'backgroundColor1').name('Gradient Center'), 'The color at the center of the radial background gradient.').onChange(() => this.updateBackground());
+        this.addInfo(backgroundFolder.addColor(SETTINGS.scene, 'backgroundColor2').name('Gradient Edge'), 'The color at the edges of the radial background gradient.').onChange(() => this.updateBackground());
+        this.addInfo(backgroundFolder.add(SETTINGS.scene, 'gradientSharpness', 0.1, 1.5).name('Gradient Sharpness'), 'Controls how quickly the center color transitions to the edge color. Lower values are softer, higher values are harder.').onChange(v => { this.backgroundMaterial.uniforms.sharpness.value = v; this.setNeedsRender(); });
+        const typoFolder = addFolder(sceneSetup, 'Typography', null, 'Control the appearance of the text in the header.').close();
+        this.addInfo(typoFolder.add(SETTINGS.typography, 'fontLink').name('Google Font URL'), 'Paste a URL from fonts.google.com here to load a custom font.').onFinishChange(url => this.loadCustomFont(url));
+        this.addInfo(typoFolder.add(SETTINGS.typography, 'position', 0, 50, 0.5).name('Vertical Position (%)'), 'How far the entire text block is from the top of the screen.').onChange(() => this.updateTypography());
+        this.addInfo(typoFolder.add(SETTINGS.typography, 'horizontalPosition', -45, 45, 0.5).name('Horizontal Pos (%)'), 'Moves the entire text block left or right.').onChange(() => this.updateTypography());
+        const fontWeights = { "Thin (100)": "100", "Extra-Light (200)": "200", "Light (300)": "300", "Normal (400)": "400", "Medium (500)": "500", "Semi-Bold (600)": "600", "Bold (700)": "700", "Extra-Bold (800)": "800", "Black (900)": "900" };
+        const textTransforms = { "None": "none", "Uppercase": "uppercase", "Lowercase": "lowercase", "Capitalize": "capitalize" };
+        const addTypoSubFolder = (parent, name, settingsObj, info) => { const folder = addFolder(parent, name, null, info).close(); this.addInfo(folder.add(settingsObj, 'fontFamily').name('Font Family'), 'Set the CSS font-family property. Use the loader above for Google Fonts.').onChange(() => this.updateTypography()); this.addInfo(folder.add(settingsObj, 'size', 0.1, 10, 0.1).name('Size (vw)'), 'Responsive font size, based on viewport width (vw).').onChange(() => this.updateTypography()); this.addInfo(folder.add(settingsObj, 'minSize', 0.1, 5, 0.1).name('Min Size (rem)'), 'The smallest the font is allowed to get on small screens.').onChange(() => this.updateTypography()); this.addInfo(folder.add(settingsObj, 'maxSize', 0.1, 10, 0.1).name('Max Size (rem)'), 'The largest the font is allowed to get on large screens.').onChange(() => this.updateTypography()); this.addInfo(folder.addColor(settingsObj, 'color').name('Color'), 'The color of the text.').onChange(() => this.updateTypography()); this.addInfo(folder.add(settingsObj, 'weight', fontWeights).name('Font Weight'), 'The thickness of the text.').onChange(() => this.updateTypography()); this.addInfo(folder.add(settingsObj, 'letterSpacing', -5, 10, 0.1).name('Letter Spacing (px)'), 'The space between characters.').onChange(() => this.updateTypography()); this.addInfo(folder.add(settingsObj, 'transform', textTransforms).name('Transform'), 'Applies text transformations like all caps.').onChange(() => this.updateTypography()); };
+        addTypoSubFolder(typoFolder, 'Main Title', SETTINGS.typography.title, "Settings for the main 'it’s me, max.' title.");
+        addTypoSubFolder(typoFolder, 'Subtitle', SETTINGS.typography.subtitle, "Settings for the smaller descriptive text.");
+        addTypoSubFolder(typoFolder, 'CTA Text', SETTINGS.typography.cta, "Settings for the 'Pick a card' call-to-action text.");
+        const cameraFolder = addFolder(sceneSetup, 'Camera', null, 'Adjust the main camera\'s properties. Affects what and how you see the scene.').close();
+        this.addInfo(cameraFolder.add(SETTINGS.camera, 'fov', 10, 120).name('Field of View (FOV)'), 'Widens or narrows the camera\'s lens. Higher values are like a wide-angle lens (more distortion), lower values are like a telephoto lens (flatter).').onChange(value => { this.camera.fov = value; this.camera.updateProjectionMatrix(); this.animationController?.updatePresentedCardTransform(); this.setNeedsRender(); });
+        this.addInfo(cameraFolder.add(SETTINGS.camera.position, 'x', -20, 20).name('Pos X'), 'Moves the camera left or right.').onChange(v => { this.camera.position.x = v; this.setNeedsRender(); });
+        this.addInfo(cameraFolder.add(SETTINGS.camera.position, 'y', -20, 20).name('Pos Y'), 'Moves the camera up or down.').onChange(v => { this.camera.position.y = v; this.setNeedsRender(); });
+        this.addInfo(cameraFolder.add(SETTINGS.camera.position, 'z', 0, 40).name('Pos Z'), 'Moves the camera forward or backward.').onChange(() => { this.camera.position.z = SETTINGS.camera.position.z; this.animationController?.updatePresentedCardTransform(); this.setNeedsRender(); });
+        const lightingFolder = addFolder(sceneSetup, 'Lighting', null, 'Control the lights that illuminate the cards.').close();
+        const ambientFolder = addFolder(lightingFolder, 'Ambient Light', null, 'A gentle light that illuminates everything in the scene equally, providing base brightness and coloring shadows.').close();
+        this.addInfo(ambientFolder.addColor(SETTINGS.lighting.ambient, 'color').name('Color'), 'The color of the ambient light.').onChange(value => { this.ambientLight.color.set(value); this.setNeedsRender(); });
+        this.addInfo(ambientFolder.add(SETTINGS.lighting.ambient, 'intensity', 0, 5, 0.01).name('Intensity'), 'The brightness of the ambient light.').onChange(value => { this.ambientLight.intensity = value; this.setNeedsRender(); });
+        const spotlightFolder = addFolder(lightingFolder, 'Spotlight (Deck)', null, 'The main directional light that casts shadows and creates highlights on the deck of cards.').close();
+        this.addInfo(spotlightFolder.add(SETTINGS.lighting.spotlight, 'showGuide').name('Show Helper'), 'Displays a wireframe guide showing the spotlight\'s position and direction.').onChange(value => { this.spotLightHelper.visible = this.isDebugMode && value; this.setNeedsRender(); });
+        this.addInfo(spotlightFolder.addColor(SETTINGS.lighting.spotlight, 'color').name('Color'), 'The color of the spotlight.').onChange(value => { this.spotLight.color.set(value); this.setNeedsRender(); });
+        this.addInfo(spotlightFolder.add(SETTINGS.lighting.spotlight, 'intensity', 0, 2000).name('Intensity'), 'The brightness of the spotlight.').onChange(value => { this.spotLight.intensity = value; this.setNeedsRender(); });
+        this.addInfo(spotlightFolder.add(SETTINGS.lighting.spotlight, 'angle', 0, Math.PI / 2, 0.001).name('Angle'), 'The width of the spotlight\'s cone.').onChange(value => { this.spotLight.angle = value; this.spotLightHelper.update(); this.setNeedsRender(); });
+        this.addInfo(spotlightFolder.add(SETTINGS.lighting.spotlight, 'penumbra', 0, 1).name('Penumbra'), 'The softness of the spotlight\'s edge. 0 is a hard edge, 1 is a very soft edge.').onChange(value => { this.spotLight.penumbra = value; this.setNeedsRender(); });
+        this.addInfo(spotlightFolder.add(SETTINGS.lighting.spotlight, 'decay', 0, 2).name('Decay'), 'How the light intensity diminishes over distance.').onChange(v => { this.spotLight.decay = v; this.setNeedsRender(); });
+        const spPos = addFolder(spotlightFolder, 'Position', null, 'Controls the source position of the spotlight.').close();
+        spPos.add(SETTINGS.lighting.spotlight.position, 'x', -30, 30).onChange(v => { this.spotLight.position.x = v; this.setNeedsRender(); });
+        spPos.add(SETTINGS.lighting.spotlight.position, 'y', -30, 30).onChange(v => { this.spotLight.position.y = v; this.setNeedsRender(); });
+        spPos.add(SETTINGS.lighting.spotlight.position, 'z', -30, 30).onChange(v => { this.spotLight.position.z = v; this.setNeedsRender(); });
+        const spTgt = addFolder(spotlightFolder, 'Target', null, 'Controls the point the spotlight is aimed at.').close();
+        spTgt.add(SETTINGS.lighting.spotlight.target, 'x', -30, 30).onChange(v => { this.spotLight.target.position.x = v; this.setNeedsRender(); });
+        spTgt.add(SETTINGS.lighting.spotlight.target, 'y', -30, 30).onChange(v => { this.spotLight.target.position.y = v; this.setNeedsRender(); });
+        spTgt.add(SETTINGS.lighting.spotlight.target, 'z', -30, 30).onChange(v => { this.spotLight.target.position.z = v; this.setNeedsRender(); });
+        const rimlightFolder = addFolder(lightingFolder, 'Rim Light', null, 'A light from behind the cards to create a highlight on their edges, separating them from the background.').close();
+        this.addInfo(rimlightFolder.add(SETTINGS.lighting.rimLight, 'enabled').name('Enabled'), 'Toggles the rim light.').onChange(v => { this.rimLight.visible = v; this.rimLightHelper.visible = this.isDebugMode && v && SETTINGS.lighting.rimLight.showGuide; this.setNeedsRender(); });
+        this.addInfo(rimlightFolder.add(SETTINGS.lighting.rimLight, 'showGuide').name('Show Helper'), 'Displays a wireframe guide for the rim light.').onChange(v => { this.rimLightHelper.visible = this.isDebugMode && SETTINGS.lighting.rimLight.enabled && v; this.setNeedsRender(); });
+        this.addInfo(rimlightFolder.addColor(SETTINGS.lighting.rimLight, 'color').name('Color')).onChange(v => { this.rimLight.color.set(v); this.setNeedsRender(); });
+        this.addInfo(rimlightFolder.add(SETTINGS.lighting.rimLight, 'intensity', 0, 10).name('Intensity')).onChange(v => { this.rimLight.intensity = v; this.setNeedsRender(); });
+        const rimSourcePos = addFolder(rimlightFolder, 'Source Position', null, 'Controls the source position of the rim light.').close();
+        rimSourcePos.add(SETTINGS.lighting.rimLight.position, 'x', -30, 30).onChange(v => { this.rimLight.position.x = v; this.setNeedsRender(); });
+        rimSourcePos.add(SETTINGS.lighting.rimLight.position, 'y', -30, 30).onChange(v => { this.rimLight.position.y = v; this.setNeedsRender(); });
+        rimSourcePos.add(SETTINGS.lighting.rimLight.position, 'z', -30, 30).onChange(v => { this.rimLight.position.z = v; this.setNeedsRender(); });
+        const rimTargetPos = addFolder(rimlightFolder, 'Target Position', null, 'Controls the point the rim light is aimed at.').close();
+        rimTargetPos.add(SETTINGS.lighting.rimLight.target, 'x', -30, 30).onChange(v => { this.rimLight.target.position.x = v; this.setNeedsRender(); });
+        rimTargetPos.add(SETTINGS.lighting.rimLight.target, 'y', -30, 30).onChange(v => { this.rimLight.target.position.y = v; this.setNeedsRender(); });
+        rimTargetPos.add(SETTINGS.lighting.rimLight.target, 'z', -30, 30).onChange(v => { this.rimLight.target.position.z = v; this.setNeedsRender(); });
+        const shadowFolder = addFolder(sceneSetup, 'Shadows', null, 'Settings for the shadows cast by the cards.').close();
+        this.addInfo(shadowFolder.add(SETTINGS.shadows, 'enabled').name('Enabled'), 'Toggles shadows on or off. Requires scene rebuild (automatic).').onFinishChange(() => this.rebuildScene());
+        this.addInfo(shadowFolder.add(SETTINGS.shadows, 'planeY', -20, 0).name('Plane Y Position'), 'The vertical position of the invisible plane that catches the shadows.').onChange(v => { this.shadowPlane.position.y = v; this.setNeedsRender(); });
+        this.addInfo(shadowFolder.add(SETTINGS.shadows, 'planeOpacity', 0, 1).name('Opacity'), 'The darkness of the shadows.').onChange(v => { this.shadowPlane.material.opacity = v; this.setNeedsRender(); });
+        this.addInfo(shadowFolder.add(SETTINGS.shadows, 'bias', -0.001, 0.001, 0.00001).name('Bias'), 'Helps prevent "shadow acne" artifacts. Adjust slightly if shadows look glitchy.').onChange(v => { this.spotLight.shadow.bias = v; this.setNeedsRender(); });
+        this.addInfo(shadowFolder.add(SETTINGS.shadows, 'normalBias', -0.05, 0.05, 0.001).name('Normal Bias'), 'A more advanced setting to prevent shadow artifacts on curved or angled surfaces.').onChange(v => { this.spotLight.shadow.normalBias = v; this.setNeedsRender(); });
+        this.addInfo(shadowFolder.add(SETTINGS.shadows, 'mapSize', [256, 512, 1024, 2048, 4096]).name('Quality (Map Size)'), 'The resolution of the shadow map. Higher values create sharper, more detailed shadows at a performance cost.').onFinishChange(v => { this.spotLight.shadow.mapSize.width = v; this.spotLight.shadow.mapSize.height = v; this.spotLight.shadow.map.dispose(); this.spotLight.shadow.map = null; this.setNeedsRender(); });
+        const cardSetup = addFolder(this.gui, 'Card Setup', 'gui-card-setup', 'Configure the layout, material, and interaction properties of the cards.');
+        this.orbitFolder = addFolder(cardSetup, 'Card Orbit', null, 'Controls the position and orientation of the entire deck of cards.').close();
+        this.addInfo(this.orbitFolder.add(SETTINGS.orbit.position, 'x', -10, 10, 0.1).name('Deck X-Offset'), 'Moves the entire deck left or right.').onChange(v => { this.orbitGroup.position.x = v; this.setNeedsRender(); });
+        this.addInfo(this.orbitFolder.add(SETTINGS.orbit.position, 'y', -10, 10, 0.1).name('Deck Height'), 'Moves the entire deck up or down.').onChange(v => { this.orbitGroup.position.y = v; this.setNeedsRender(); });
+        this.addInfo(this.orbitFolder.add(SETTINGS.orbit.position, 'z', -10, 10, 0.1).name('Deck Z-Offset'), 'Moves the entire deck forward or backward.').onChange(v => { this.orbitGroup.position.z = v; this.setNeedsRender(); });
+        this.addInfo(this.orbitFolder.add(SETTINGS.orbit.rotation, 'x', -90, 90).name('Pitch'), 'Tilts the entire deck forwards or backwards.').onChange(() => this.updateOrbitAndPanning());
+        this.addInfo(this.orbitFolder.add(SETTINGS.orbit.rotation, 'y', -90, 90).name('Yaw'), 'Rotates the entire deck left or right.').onChange(() => this.updateOrbitAndPanning());
+        this.addInfo(this.orbitFolder.add(SETTINGS.orbit.rotation, 'z', -90, 90).name('Roll'), 'Tilts the entire deck side-to-side.').onChange(() => this.updateOrbitAndPanning());
+        this.addInfo(this.orbitFolder.add(SETTINGS.orbit, 'panRangeLeft', 0, 180).name('Pan Left Limit'), 'The maximum angle (in degrees) you can pan the deck to the left.').onFinishChange(() => this.rebuildScene());
+        this.addInfo(this.orbitFolder.add(SETTINGS.orbit, 'panRangeRight', -180, 0).name('Pan Right Limit'), 'The maximum angle (in degrees) you can pan the deck to the right.').onFinishChange(() => this.rebuildScene());
+        this.layoutFolder = addFolder(cardSetup, 'Card Layout', null, 'Adjusts how the individual cards are arranged within the deck.').close();
+        this.addInfo(this.layoutFolder.add(SETTINGS.cardLayout, 'radius', 1, 15).name("Fan Radius"), 'The radius of the arc the cards are laid out on. Larger values create a wider, flatter arc.').onChange(() => this.updateCardLayout());
+        this.addInfo(this.layoutFolder.add(SETTINGS.cardLayout, 'arc', 0, 360).name("Fan Arc"), 'The total angle (in degrees) the fan of cards covers.').onChange(() => this.updateCardLayout());
+        this.addInfo(this.layoutFolder.add(SETTINGS.cardLayout, 'spacing', 0, 0.5, 0.001).name('Vertical Spacing'), 'The vertical distance between each card, creating a cascading effect.').onChange(() => this.updateCardLayout());
+        this.addInfo(this.layoutFolder.add(SETTINGS.cardLayout, 'pitch', -180, 180).name("Card Pitch"), 'Tilts each individual card forwards or backwards.').onChange(() => this.updateCardLayout());
+        this.addInfo(this.layoutFolder.add(SETTINGS.cardLayout, 'yaw', -4, 4, 0.01).name("Card Yaw"), 'Turns each individual card left or right relative to its position in the arc.').onChange(() => this.updateCardLayout());
+        this.addInfo(this.layoutFolder.add(SETTINGS.cardLayout, 'roll', -180, 180).name("Card Roll"), 'Tilts each individual card side-to-side.').onChange(() => this.updateCardLayout());
+        const skewFolder = addFolder(this.layoutFolder, 'Skew', null, 'Applies a progressive rotation to cards from the center outwards.').close();
+        this.addInfo(skewFolder.add(SETTINGS.cardLayout.skew, 'x', -45, 45).name('Skew X'), 'Progressively pitches cards from the center. Creates a "V" or inverted "V" shape.').onChange(() => this.updateCardLayout());
+        this.addInfo(skewFolder.add(SETTINGS.cardLayout.skew, 'y', -45, 45).name('Skew Y'), 'Progressively yaws cards from the center. Creates a fanning-out effect.').onChange(() => this.updateCardLayout());
+        const jitterFolder = addFolder(this.layoutFolder, 'Jitter', null, 'Adds randomness to card placement for a more organic look.').close();
+        this.addInfo(jitterFolder.add(SETTINGS.cardLayout.jitter, 'position', 0, 1, 0.01).name('Position Jitter'), 'Amount of random offset for each card\'s position.').onFinishChange(() => this.rebuildScene());
+        this.addInfo(jitterFolder.add(SETTINGS.cardLayout.jitter, 'rotation', 0, 45, 0.1).name('Rotation Jitter'), 'Amount of random offset for each card\'s rotation.').onFinishChange(() => this.rebuildScene());
+        const materialFolder = addFolder(cardSetup, 'Card Material', null, 'Controls the physical surface properties of the cards (shininess, texture, etc.).').close();
+        this.addInfo(materialFolder.add(SETTINGS.cardMaterial, 'roughness', 0, 1), 'Controls how matte (1) or glossy (0) the card surface is.').onChange(value => this.updateCardMaterial('roughness', value));
+        this.addInfo(materialFolder.add(SETTINGS.cardMaterial, 'metalness', 0, 1), 'Controls how metallic the card surface appears. Usually best kept at or near 0 for non-metal objects.').onChange(value => this.updateCardMaterial('metalness', value));
+        this.addInfo(materialFolder.addColor(SETTINGS.cardMaterial, 'emissive').name('Emissive Color'), 'Makes the card emit light of this color. Best used with Bloom.').onChange(value => this.updateCardMaterial('emissive', new THREE.Color(value)));
+        this.addInfo(materialFolder.add(SETTINGS.cardMaterial, 'emissiveIntensity', 0, 5).name('Emissive Intensity'), 'The brightness of the emitted light.').onChange(value => this.updateCardMaterial('emissiveIntensity', value));
+        this.addInfo(materialFolder.add(SETTINGS.cardMaterial, 'useNormalMap').name('Use Normal Map'), 'Adds a fake 3D texture effect to the card front, making it look like it has depth and texture. Requires scene rebuild.').onFinishChange(() => this.rebuildScene());
+        this.addInfo(materialFolder.add(SETTINGS.cardMaterial.normalScale, 'x', 0, 5, 0.01).name('Normal Scale X'), 'The horizontal intensity of the normal map texture effect.').onChange(value => this.cards.forEach(card => card.traverse(c => { if (c.isMesh && c.material.normalMap) { c.material.normalScale.x = value; c.material.needsUpdate = true; this.setNeedsRender(); } })));
+        this.addInfo(materialFolder.add(SETTINGS.cardMaterial.normalScale, 'y', 0, 5, 0.01).name('Normal Scale Y'), 'The vertical intensity of the normal map texture effect.').onChange(value => this.cards.forEach(card => card.traverse(c => { if (c.isMesh && c.material.normalMap) { c.material.normalScale.y = value; c.material.needsUpdate = true; this.setNeedsRender(); } })));
+        const interactionFolder = addFolder(cardSetup, 'Interaction', null, 'How the user\'s input affects the scene.').close();
+        this.addInfo(interactionFolder.add(SETTINGS.interaction, 'friction', 0.8, 0.99).name('Panning Friction'), 'How quickly the deck stops panning after you "flick" it. Higher values mean less friction (glides for longer).').onChange();
+        this.addInfo(interactionFolder.add(SETTINGS.interaction, 'panEdgeRatio', 0, 0.5).name('Edge Pan Zone'), 'The size of the area at the left/right edges of the screen that triggers automatic panning when the mouse hovers there.').onChange();
+        this.addInfo(interactionFolder.add(SETTINGS.interaction, 'panEdgeSpeed', 0, 0.05).name('Edge Pan Speed'), 'How fast the deck pans when the mouse is in the edge pan zone.').onChange();
+        this.addInfo(interactionFolder.add(SETTINGS.interaction, 'hoverScale', 1, 1.2).name('Hover Scale'), 'How much a card scales up when you hover over it.').onChange();
+        this.addInfo(interactionFolder.add(SETTINGS.interaction, 'parallaxFactor', 0, 0.2, 0.001).name('Parallax Factor'), 'How much the presented card rotates to follow the mouse.').onChange();
+        this.addInfo(interactionFolder.add(SETTINGS.interaction, 'dimFactor', 0, 1).name('Dim Factor'), 'How much the other cards are darkened when one card is presented. 0 is black, 1 is no dimming.').onChange();
+        this.addInfo(interactionFolder.add(SETTINGS.interaction, 'clickThreshold', 0, 50).name('Click Threshold'), 'The maximum distance (in pixels) the mouse can move between mousedown and mouseup to be considered a "click".').onChange();
+        const animationSetup = addFolder(this.gui, 'Animation Setup', 'gui-animation-setup', 'Customize the duration and easing of card presentation animations.');
+        const presentAnimFolder = addFolder(animationSetup, 'Present Animation', null, 'Animation for when a card is selected and moves to the front.').close();
+        const presentOffsetFolder = addFolder(presentAnimFolder, 'Initial Offset', null, 'The initial movement of the card from the deck, relative to its own orientation.').close();
+        this.addInfo(presentOffsetFolder.add(SETTINGS.animation.present.offset, 'x', -5, 5).name('X (Left/Right)'), 'Initial horizontal offset.');
+        this.addInfo(presentOffsetFolder.add(SETTINGS.animation.present.offset, 'y', -5, 5).name('Y (Back/Forward)'), 'Initial vertical offset.');
+        this.addInfo(presentOffsetFolder.add(SETTINGS.animation.present.offset, 'z', -5, 5).name('Z (Down/Up)'), 'Initial depth offset.');
+        this.addInfo(presentAnimFolder.add(SETTINGS.animation.present, 'pullDuration', 0, 2).name('Pull Duration'), 'How long the initial offset animation takes.').onChange();
+        this.addInfo(presentAnimFolder.add(SETTINGS.animation.present, 'pullEase', descriptiveEases).name('Pull Ease'), 'The easing style for the pull animation.').onChange();
+        this.addInfo(presentAnimFolder.add(SETTINGS.animation.present, 'travelDuration', 0, 2).name('Travel Duration'), 'How long it takes for the card to travel to the front.').onChange();
+        this.addInfo(presentAnimFolder.add(SETTINGS.animation.present, 'travelEase', descriptiveEases).name('Travel Ease'), 'The easing style for the travel animation.').onChange();
+        this.addInfo(presentAnimFolder.add(SETTINGS.animation.present, 'scaleDuration', 0, 2).name('Scale Duration'), 'How long it takes for the card to scale up to its final size.').onChange();
+        this.addInfo(presentAnimFolder.add(SETTINGS.animation.present, 'scaleEase', descriptiveEases).name('Scale Ease'), 'The easing style for the scaling animation.').onChange();
+        const dismissAnimFolder = addFolder(animationSetup, 'Dismiss Animation', null, 'Animation for when a card is dismissed and returns to the deck.').close();
+        const dismissOffsetFolder = addFolder(dismissAnimFolder, 'Return Offset', null, 'The intermediate offset the card moves to before sliding into the deck, relative to its final position.').close();
+        this.addInfo(dismissOffsetFolder.add(SETTINGS.animation.dismiss.offset, 'x', -5, 5).name('X (Left/Right)'), 'Return horizontal offset.');
+        this.addInfo(dismissOffsetFolder.add(SETTINGS.animation.dismiss.offset, 'y', -5, 5).name('Y (Back/Forward)'), 'Return vertical offset.');
+        this.addInfo(dismissOffsetFolder.add(SETTINGS.animation.dismiss.offset, 'z', -5, 5).name('Z (Down/Up)'), 'Return depth offset.');
+        this.addInfo(dismissAnimFolder.add(SETTINGS.animation.dismiss, 'travelDuration', 0, 2).name('Travel Duration'), 'How long it takes for the card to travel back to the deck area.').onChange();
+        this.addInfo(dismissAnimFolder.add(SETTINGS.animation.dismiss, 'travelEase', descriptiveEases).name('Travel Ease'), 'The easing style for the return travel.').onChange();
+        this.addInfo(dismissAnimFolder.add(SETTINGS.animation.dismiss, 'slideDuration', 0, 2).name('Slide Duration'), 'How long it takes for the card to slide back into its final place in the deck.').onChange();
+        this.addInfo(dismissAnimFolder.add(SETTINGS.animation.dismiss, 'slideEase', descriptiveEases).name('Slide Ease'), 'The easing style for the final slide.').onChange();
+        const presentStateFolder = addFolder(animationSetup, 'Presented Card State', null, 'The final position, rotation, and scale of a card when it is presented.').close();
+        this.addInfo(presentStateFolder.add(SETTINGS.presentState.position, 'x', -5, 5).name('Position X'), 'The final horizontal position of the card.').onChange(() => this.animationController.updatePresentedCardTransform());
+        this.addInfo(presentStateFolder.add(SETTINGS.presentState.position, 'y', -5, 5).name('Position Y'), 'The final vertical position of the card.').onChange(() => this.animationController.updatePresentedCardTransform());
+        this.addInfo(presentStateFolder.add(SETTINGS.presentState.position, 'z', 1, 10).name('Position Z (dist)'), 'The distance of the card from the camera. Lower values are closer.').onChange(() => this.animationController.updatePresentedCardTransform());
+        this.addInfo(presentStateFolder.add(SETTINGS.presentState.rotation, 'x', -180, 180).name('Rotation X'), 'The final X-axis rotation (tilt) of the card.').onChange(() => this.animationController.updatePresentedCardTransform());
+        this.addInfo(presentStateFolder.add(SETTINGS.presentState.rotation, 'y', -180, 180).name('Rotation Y'), 'The final Y-axis rotation of the card. 180 means it shows the back face.').onChange(() => this.animationController.updatePresentedCardTransform());
+        this.addInfo(presentStateFolder.add(SETTINGS.presentState.rotation, 'z', -180, 180).name('Rotation Z'), 'The final Z-axis rotation (roll) of the card.').onChange(() => this.animationController.updatePresentedCardTransform());
+        this.addInfo(presentStateFolder.add(SETTINGS.presentState, 'scale', 0.1, 2).name('Scale Multiplier'), 'A multiplier for the card\'s final scale, which is also calculated to fit the screen.').onChange(() => this.animationController.updatePresentedCardTransform());
+        this.addInfo(presentStateFolder.add(SETTINGS.presentState, 'verticalMargin', 0, 0.4).name('Vertical Margin'), 'The amount of empty space to leave at the top and bottom of the screen when calculating the card\'s size.').onChange(() => this.animationController.updatePresentedCardTransform());
+        const pLightOffset = addFolder(presentStateFolder, 'Light Offset', null, 'Controls the position of the light relative to the presented card.').close();
+        pLightOffset.add(SETTINGS.lighting.presentLight.offset, 'x', -5, 5).onChange(() => this.animationController.updatePresentedCardTransform());
+        pLightOffset.add(SETTINGS.lighting.presentLight.offset, 'y', -5, 5).onChange(() => this.animationController.updatePresentedCardTransform());
+        pLightOffset.add(SETTINGS.lighting.presentLight.offset, 'z', -5, 5).onChange(() => this.animationController.updatePresentedCardTransform());
+        const ppFolder = addFolder(this.gui, 'Post Processing', 'gui-post-processing', 'Visual effects applied to the entire scene after it is rendered. Can impact performance.');
+        const filmFolder = addFolder(ppFolder, 'Film Grain', null, 'Simulates the look of old film by adding noise and scanlines.').close();
+        this.addInfo(filmFolder.add(SETTINGS.postProcessing.film, 'enabled').name('Enabled'), 'Toggles the film grain effect.').onChange(() => this.updatePostProcessingState());
+        this.addInfo(filmFolder.add(SETTINGS.postProcessing.film, 'noiseIntensity', 0, 1, 0.01).name('Noise Intensity'), 'The amount of random noise (grain).').onChange(() => this.updatePostProcessingState());
+        this.addInfo(filmFolder.add(SETTINGS.postProcessing.film, 'scanlineIntensity', 0, 1, 0.01).name('Scanline Intensity'), 'The visibility of the horizontal scanlines.').onChange(() => this.updatePostProcessingState());
+        this.addInfo(filmFolder.add(SETTINGS.postProcessing.film, 'scanlineCount', 0, 4096, 1).name('Scanline Count'), 'The number of scanlines on the screen.').onChange(() => this.updatePostProcessingState());
+        const rgbFolder = addFolder(ppFolder, 'RGB Shift', null, 'Splits the red, green, and blue color channels slightly, creating a chromatic aberration effect.').close();
+        this.addInfo(rgbFolder.add(SETTINGS.postProcessing.rgbShift, 'enabled').name('Enabled'), 'Toggles the RGB shift effect.').onChange(() => this.updatePostProcessingState());
+        this.addInfo(rgbFolder.add(SETTINGS.postProcessing.rgbShift, 'amount', 0, 0.05, 0.0001).name('Amount'), 'How far the color channels are shifted apart.').onChange(() => this.updatePostProcessingState());
+        this.addInfo(rgbFolder.add(SETTINGS.postProcessing.rgbShift, 'angle', 0, 360, 1).name('Angle'), 'The angle of the color shift.').onChange(() => this.updatePostProcessingState());
+        const vignetteFolder = addFolder(ppFolder, 'Vignette', null, 'Darkens the corners of the screen, focusing attention on the center.').close();
+        this.addInfo(vignetteFolder.add(SETTINGS.postProcessing.vignette, 'enabled').name('Enabled'), 'Toggles the vignette effect.').onChange(() => this.updatePostProcessingState());
+        this.addInfo(vignetteFolder.add(SETTINGS.postProcessing.vignette, 'offset', 0, 2).name('Offset'), 'Controls the size of the central bright area. Higher values make it smaller.').onChange(() => this.updatePostProcessingState());
+        this.addInfo(vignetteFolder.add(SETTINGS.postProcessing.vignette, 'darkness', 0, 2).name('Darkness'), 'How dark the corners are.').onChange(() => this.updatePostProcessingState());
+        const dofFolder = addFolder(ppFolder, 'Depth of Field (DoF)', null, 'Simulates a camera lens by blurring parts of the scene that are out of focus. Can be performance-intensive.').close();
+        this.addInfo(dofFolder.add(SETTINGS.postProcessing.dof, 'enabled').name('Enabled'), 'Toggles the Depth of Field effect.').onChange(() => this.updatePostProcessingState());
+        this.addInfo(dofFolder.add(SETTINGS.postProcessing.dof, 'focus', 0, 50, 0.1).name('Focus Distance'), 'The distance from the camera that will be perfectly in focus.').onChange(() => this.updatePostProcessingState());
+        this.addInfo(dofFolder.add(SETTINGS.postProcessing.dof, 'aperture', 0, 0.001, 0.00001).name('Aperture'), 'The size of the "lens" opening. Higher values create a more intense, shallower blur effect.').onChange(() => this.updatePostProcessingState());
+        this.addInfo(dofFolder.add(SETTINGS.postProcessing.dof, 'maxblur', 0, 0.02, 0.0001).name('Max Blur'), 'The maximum amount of blur that can be applied to out-of-focus areas.').onChange(() => this.updatePostProcessingState());
+        const halftoneFolder = addFolder(ppFolder, 'Halftone', null, 'Creates a retro, comic-book-style dot pattern effect.').close();
+        this.addInfo(halftoneFolder.add(SETTINGS.postProcessing.halftone, 'enabled').name('Enabled'), 'Toggles the halftone effect.').onChange(() => this.updatePostProcessingState());
+        this.addInfo(halftoneFolder.add(SETTINGS.postProcessing.halftone, 'backgroundOnly').name('Background Only'), 'If enabled, the effect is only applied to the background gradient, not the cards.').onChange(() => this.updatePostProcessingState());
+        this.addInfo(halftoneFolder.add(SETTINGS.postProcessing.halftone, 'shape', { Dot: 1, Ellipse: 2, Line: 3, Square: 4, X: 5 }).name('Shape'), 'The shape of the halftone pattern elements.').onChange(() => this.updatePostProcessingState());
+        this.addInfo(halftoneFolder.add(SETTINGS.postProcessing.halftone, 'radius', 1, 1000).name('Radius'), 'The size of the dots/shapes in the pattern.').onChange(() => this.updatePostProcessingState());
+        this.addInfo(halftoneFolder.add(SETTINGS.postProcessing.halftone, 'scatter', 0, 1).name('Scatter'), 'Adds randomness to the pattern, making it look less like a perfect grid.').onChange(() => this.updatePostProcessingState());
+        this.addInfo(halftoneFolder.add(SETTINGS.postProcessing.halftone, 'greyscale').name('Greyscale'), 'Converts the image to greyscale before applying the halftone effect.').onChange(() => this.updatePostProcessingState());
+        this.addInfo(halftoneFolder.add(SETTINGS.postProcessing.halftone, 'useAverageColor').name('Use Average Color'), 'Toggles between a custom color and a darkened average of the original pixel color for the halftone effect.').onChange(() => this.updatePostProcessingState());
+        this.addInfo(halftoneFolder.addColor(SETTINGS.postProcessing.halftone, 'customColor').name('Custom Color'), 'The color of the halftone pattern when "Use Average Color" is disabled.').onChange(() => this.updatePostProcessingState());
+        [sceneSetup, cardSetup, animationSetup, ppFolder].forEach(f => f.close());
+        this.gui.close();
+        this.gui.add({ copy: () => navigator.clipboard.writeText(`const SETTINGS = ${JSON.stringify(SETTINGS, null, 4)};`) }, 'copy').name("Copy Settings");
+    }
+    async rebuildScene() { while (this.orbitGroup.children.length > 0) { const card = this.orbitGroup.children[0]; this.orbitGroup.remove(card); card.traverse(child => { if (child.isMesh) { child.geometry.dispose(); if (child.material.map) child.material.map.dispose(); if (child.material.normalMap) child.material.normalMap.dispose(); child.material.dispose(); } }); } this.cards = []; this.orbitGroup.position.copy(SETTINGS.orbit.position); this.orbitGroup.rotation.set(0, 0, 0); this.currentPanY = 0; this.targetPanY = 0; this.minPanY = -THREE.MathUtils.degToRad(SETTINGS.orbit.panRangeLeft); this.maxPanY = THREE.MathUtils.degToRad(SETTINGS.orbit.panRangeRight); await this.setupCards(); this.updateOrbitAndPanning(); }
+    updateCardMaterial(property, value) { this.cards.forEach(card => card.traverse(child => { if (child.isMesh && child.material.isMeshStandardMaterial) { child.material[property] = value; child.material.needsUpdate = true; } })); this.setNeedsRender(); }
+    loadCustomFont(url) { if (!url || typeof url !== 'string') return; const existingLink = document.getElementById('custom-font-stylesheet'); if (existingLink) { existingLink.remove(); } const link = document.createElement('link'); link.id = 'custom-font-stylesheet'; link.rel = 'stylesheet'; link.href = url; document.head.appendChild(link); try { const fontUrl = new URL(url); if (fontUrl.hostname === 'fonts.googleapis.com') { const fontFamily = fontUrl.searchParams.get('family'); if (fontFamily) { const primaryFontName = fontFamily.split(':')[0].replace(/\+/g, ' '); const typo = SETTINGS.typography; const newFontFamily = `'${primaryFontName}', sans-serif`; typo.title.fontFamily = newFontFamily; typo.subtitle.fontFamily = newFontFamily; typo.cta.fontFamily = newFontFamily; if (this.gui) { this.gui.foldersRecursive().forEach(folder => { folder.controllers.forEach(c => c.updateDisplay()); }); } this.updateTypography(); } } } catch (e) { console.warn("Could not parse font URL. Please set font family manually.", e); } }
+    updateTypography() { const { position, horizontalPosition, title, subtitle, cta } = SETTINGS.typography; const header = document.querySelector('.header-title'); if (!header) return; header.style.top = `${position}%`; header.style.left = `${50 + horizontalPosition}%`; const applyStyles = (selector, styles) => { const element = document.querySelector(selector); if (element) { element.style.fontFamily = styles.fontFamily; element.style.fontSize = `clamp(${styles.minSize}rem, ${styles.size}vw, ${styles.maxSize}rem)`; element.style.color = styles.color; element.style.fontWeight = styles.weight; element.style.letterSpacing = `${styles.letterSpacing}px`; element.style.textTransform = styles.transform; } }; applyStyles('.main-title', title); applyStyles('.subtitle-block', subtitle); applyStyles('.cta-text', cta); }
+    updateBackground() { if (this.backgroundMaterial) { this.backgroundMaterial.uniforms.color1.value.set(SETTINGS.scene.backgroundColor1); this.backgroundMaterial.uniforms.color2.value.set(SETTINGS.scene.backgroundColor2); } this.setNeedsRender(); }
+    handleResize() { this.camera.aspect = window.innerWidth / window.innerHeight; this.camera.updateProjectionMatrix(); this.renderer.setSize(window.innerWidth, window.innerHeight); this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); this.composer.setSize(window.innerWidth, window.innerHeight); this.composer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); this.smaaPass.setSize(window.innerWidth * this.renderer.getPixelRatio(), window.innerHeight * this.renderer.getPixelRatio()); this.animationController?.updatePresentedCardTransform(); this.setNeedsRender(); }
+}

@@ -1,0 +1,310 @@
+:root {
+    --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+body {
+    margin: 0;
+    height: 100vh;
+    color: #fff;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    overflow: hidden;
+    background: #000;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+#loading-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: #4D0002;
+    z-index: 1000;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    flex-direction: column;
+    transition: opacity 0.8s var(--ease-out-quint);
+}
+
+#loading-overlay.is-hidden {
+    opacity: 0;
+    pointer-events: none;
+}
+
+#progress-bar {
+    width: 80%;
+    max-width: 300px;
+    height: 4px;
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 2px;
+    overflow: hidden;
+}
+
+#progress-bar-inner {
+    width: 0%;
+    height: 100%;
+    background: #fff;
+    border-radius: 2px;
+    transition: width 0.3s ease-out;
+}
+
+#progress-text {
+    margin-top: 1rem;
+    font-size: 0.9rem;
+    color: rgba(255, 255, 255, 0.8);
+    text-align: center;
+}
+
+#scene-container {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 2;
+}
+
+#three-canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    outline: none;
+}
+
+.ui-container {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 3;
+}
+
+.header-title {
+    position: absolute;
+    top: 6%;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 10;
+    text-align: center;
+    width: 90%;
+    max-width: 650px;
+    transition: opacity 0.6s var(--ease-out-quint), transform 0.6s var(--ease-out-quint);
+    pointer-events: none;
+    will-change: transform, opacity;
+}
+
+.header-title.is-hidden {
+    opacity: 0;
+    transform: translateX(-50%) translateY(50px);
+}
+
+.main-title {
+    margin: 0;
+    font-weight: 600;
+    text-shadow: 0 4px 20px rgba(0, 0, 0, .5);
+    pointer-events: auto;
+    cursor: pointer;
+}
+
+.subtitle-block {
+    margin: .75rem 0;
+    line-height: 1.6;
+    opacity: .9;
+}
+
+.cta-text {
+    margin-top: 1.2rem;
+    font-weight: bold;
+    text-transform: uppercase;
+}
+
+.ui-button {
+    pointer-events: auto;
+    position: fixed;
+    z-index: 100;
+    background: rgba(0, 0, 0, 0.3);
+    border: none;
+    cursor: pointer;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    transition: opacity 0.5s var(--ease-out-quint);
+    opacity: 0;
+    backdrop-filter: blur(5px);
+    -webkit-backdrop-filter: blur(5px);
+}
+
+.dismiss-button {
+    top: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+}
+
+.dismiss-button.is-visible {
+    opacity: 1;
+}
+
+.dismiss-button svg {
+    width: 70%;
+    height: 70%;
+    fill: rgba(255, 255, 255, 0.7);
+}
+
+.nav-arrow {
+    top: 50%;
+    transform: translateY(-50%);
+    width: 50px;
+    height: 50px;
+    background: none;
+    border-radius: 50%;
+}
+
+.nav-arrow.visible {
+    opacity: 1;
+}
+
+.nav-arrow svg {
+    width: 100%;
+    height: 100%;
+    fill: rgba(255, 255, 255, 0.7);
+    filter: drop-shadow(0 0 5px rgba(0, 0, 0, .5));
+}
+
+#arrow-left {
+    left: 15px;
+}
+
+#arrow-right {
+    right: 15px;
+}
+
+#card-back-template {
+    display: none;
+    width: 400px;
+    height: 692px;
+}
+
+.seo-content {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+.lil-gui.is-hidden {
+    display: none !important;
+}
+
+.lil-gui.root {
+    z-index: 1001 !important;
+    max-height: 95vh;
+    overflow-x: hidden !important;
+    overflow-y: auto !important;
+    width: 300px !important;
+}
+
+.gui-scene-setup>.title {
+    color: #88ff88 !important;
+}
+
+.gui-card-setup>.title {
+    color: #d899ff !important;
+}
+
+.gui-post-processing>.title {
+    color: #aaff88 !important;
+}
+
+.gui-animation-setup>.title {
+    color: #88d8ff !important;
+}
+
+.gui-scene-setup .lil-gui .name,
+.gui-scene-setup>.children .name {
+    color: #c0ffc0 !important;
+}
+
+.gui-card-setup .lil-gui .name,
+.gui-card-setup>.children .name {
+    color: #eec8ff !important;
+}
+
+.gui-animation-setup .lil-gui .name,
+.gui-animation-setup>.children .name {
+    color: #c8f4ff !important;
+}
+
+.gui-post-processing .lil-gui .name,
+.gui-post-processing>.children .name {
+    color: #eeffcc !important;
+}
+
+.gui-post-processing .lil-gui>.title {
+    color: #c8ff88 !important;
+}
+
+.info-icon {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background-color: rgba(255, 255, 255, 0.3);
+    color: #111;
+    text-align: center;
+    font-size: 10px;
+    line-height: 14px;
+    font-weight: bold;
+    font-family: sans-serif;
+    cursor: help;
+    margin-left: 8px;
+    vertical-align: middle;
+    user-select: none;
+    position: relative;
+    flex-shrink: 0;
+}
+
+.lil-gui .name,
+.lil-gui .title {
+    display: flex;
+    justify-content: flex-start;
+    align-items: center;
+}
+
+#global-tooltip {
+    position: fixed;
+    padding: 8px 12px;
+    background: #282828;
+    border: 1px solid #555;
+    color: #eee;
+    border-radius: 4px;
+    font-size: 12px;
+    white-space: pre-wrap;
+    z-index: 10002;
+    pointer-events: none;
+    width: max-content;
+    max-width: 250px;
+    text-align: left;
+    line-height: 1.4;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.2s, visibility 0s 0.2s;
+    will-change: transform, opacity;
+}
+
+#global-tooltip.is-visible {
+    opacity: 1;
+    visibility: visible;
+    transition: opacity 0.2s;
+}

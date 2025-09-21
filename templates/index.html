@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Maximillian Eugene - Interactive Profile</title>
+    <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}"> <!-- THIS IS THE NEW LINE -->
+    <meta name="description" content="Maximillian Eugene's Personal Profile.">
+    <meta name="author" content="Maximillian Eugene">
+
+    <link rel="preconnect" href="https://unpkg.com" crossorigin>
+    <link rel="preconnect" href="https://i.imgur.com" crossorigin>
+    <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
+
+    <link rel="preload" as="script" href="https://unpkg.com/three@0.164.1/build/three.module.js"
+        crossorigin="anonymous">
+    <link rel="preload" as="script" href="https://unpkg.com/gsap@3.12.5/index.js" crossorigin="anonymous">
+
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://your-domain.com/">
+    <meta property="og:title" content="Maximillian Eugene - Interactive WebGL Portfolio">
+    <meta property="og:description" content="Explore the mind of Maximillian Eugene">
+    <meta property="og:image" content="{{ url_for('static', filename='images/00-TheFool.jpg') }}">
+
+    <meta property="twitter:card" content="summary_large_image">
+    <meta property="twitter:url" content="https://your-domain.com/">
+    <meta property="twitter:title" content="Maximillian Eugene - Interactive Profile">
+    <meta property="twitter:description" content="Explore the mind of Maximillian Eugene">
+    <meta property="twitter:image" content="{{ url_for('static', filename='images/00-TheFool.jpg') }}">
+
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+
+<body>
+    <div id="loading-overlay">
+        <div id="progress-bar">
+            <div id="progress-bar-inner"></div>
+        </div>
+        <div id="progress-text">Loading Experience...</div>
+    </div>
+    <div id="scene-container"><canvas id="three-canvas"></canvas></div>
+    <div class="ui-container">
+        <div class="header-title">
+            <h1 class="main-title" id="main-title">it’s me, max.</h1>
+            <div class="subtitle-block">he/him | ENFJ | 3w4 | Type A | EN/ID<br>17 | Surabaya 🇮🇩<br>engineering •
+                robotics • literature • guitar • boxing<br>founder @Fulcraworks & Launchpad | exec @TrackEco | author
+                @eclipse<br>currently scaling Fulcraworks & Launchpad</div>
+            <h2 class="cta-text">Pick a card any card</h2>
+        </div>
+        <button id="arrow-left" class="ui-button nav-arrow" aria-label="Previous Card"><svg viewBox="0 0 24 24">
+                <path d="M14.59 8.83L13.17 7.41 8.59 12l4.58 4.59 1.42-1.42L11.41 12z" />
+            </svg></button>
+        <button id="arrow-right" class="ui-button nav-arrow" aria-label="Next Card"><svg viewBox="0 0 24 24">
+                <path d="M9.41 15.17L10.83 16.59l4.58-4.59-4.58-4.59L9.41 8.83 12.59 12z" />
+            </svg></button>
+        <button class="ui-button dismiss-button" id="dismiss-button" aria-label="Dismiss card"><svg viewBox="0 0 24 24">
+                <path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6 1.41-1.41z" />
+            </svg></button>
+    </div>
+    <div id="card-back-template"></div>
+    <div class="seo-content">
+        <section>
+            <h2>My Projects</h2>
+            <div id="seo-card-container"></div>
+        </section>
+    </div>
+    <div id="global-tooltip"></div>
+    <noscript>
+        <p>This is an interactive portfolio. Please enable JavaScript to view the experience.</p>
+    </noscript>
+
+    <script type="importmap">
+        { "imports": { "three": "https://unpkg.com/three@0.164.1/build/three.module.js", "gsap": "https://unpkg.com/gsap@3.12.5/index.js", "lil-gui": "https://unpkg.com/lil-gui@0.19.2/dist/lil-gui.esm.js", "three/addons/": "https://unpkg.com/three@0.164.1/examples/jsm/" } }
+    </script>
+    <script type="module" src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+
+</html>
