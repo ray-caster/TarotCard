@@ -5,7 +5,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <title>Maximillian Eugene - Interactive Profile</title>
-    <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}"> <!-- THIS IS THE NEW LINE -->
+    <link rel="icon" href="{{ cache_buster_url_for('static', filename='favicon.ico') }}">
+
     <meta name="description" content="Maximillian Eugene's Personal Profile.">
     <meta name="author" content="Maximillian Eugene">
 
@@ -29,7 +30,7 @@
     <meta property="twitter:description" content="Explore the mind of Maximillian Eugene">
     <meta property="twitter:image" content="{{ url_for('static', filename='images/00-TheFool.jpg') }}">
 
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="stylesheet" href="{{ cache_buster_url_for('static', filename='css/style.css') }}">
 </head>
 
 <body>
@@ -73,7 +74,7 @@
     <script type="importmap">
         { "imports": { "three": "https://unpkg.com/three@0.164.1/build/three.module.js", "gsap": "https://unpkg.com/gsap@3.12.5/index.js", "lil-gui": "https://unpkg.com/lil-gui@0.19.2/dist/lil-gui.esm.js", "three/addons/": "https://unpkg.com/three@0.164.1/examples/jsm/" } }
     </script>
-    <script type="module" src="{{ url_for('static', filename='js/main.js') }}"></script>
+    <script type="module" src="{{ cache_buster_url_for('static', filename='js/main.js') }}"></script>
 </body>
 
 </html>
