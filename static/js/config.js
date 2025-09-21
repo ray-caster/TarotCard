@@ -18,7 +18,7 @@ export const CARD_DATA = [
     return card;
 });
 
-const SETTINGS = {
+export const SETTINGS = {
     "scene": {
         "backgroundColor1": "#dbd0c3",
         "backgroundColor2": "#661c1c",
